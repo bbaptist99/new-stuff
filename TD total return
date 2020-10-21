@@ -1,0 +1,204 @@
+(function ($) {
+    'use strict';
+
+    // There's multiple similar tables (long and short positions).
+    // They have duplicate html id attributes, so we need to scope ourselves to only the long table.
+    let $root;
+
+    function isUnRealizedGainLossTabActive() {
+        const href = String(window.location.href);
+        return /GainLoss.aspx/i.test(href) && /gainlosstype=unrealized/i.test(href);
+    }
+
+    function addNewColumnsToTables() {
+        $('th.GainPercentage', $root)
+            .after("<th class=TotalGain style='vertical-align: bottom'>CAGR</th>")
+            .after("<th class=TotalGainPercentage style='vertical-align: bottom'>TotGains (%)</th>")
+            .after("<th class=TotalGain style='vertical-align: bottom'>TotGains ($)</th>")
+            ;
+        $('td.GainPercentage', $root)
+            .after("<td class=CAGR></td>")
+            .after("<td class=TotalGainPercentage></td>")
+            .after("<td class=TotalGain></td>")
+            ;
+    }
+
+    function numberFormat(num) {
+        return num.toLocaleString(undefined, {maximumFractionDigits:2});
+    }
+
+    function calcCompoundAnnualGrowthRate(startValue, endValue, years) {
+        return (Math.pow(endValue / startValue, 1.0 / years) - 1.0) * 100;
+    }
+
+    function yearsDiff(startDate, endDate) {
+        return dateDiffInDays(startDate, endDate) / 365;
+    }
+
+    function toInt(str) {
+        return parseInt(str, 10);
+    }
+
+    function mdyDateStringToDateObj(mdyDateStr) {
+        const startParts = mdyDateStr.split("/");
+        return new Date(toInt("20" + startParts[2]), toInt(startParts[0]) - 1, toInt(startParts[1]));
+    }
+
+    function dateDiffInDays(a, b) {
+        const MS_PER_DAY = 1000 * 60 * 60 * 24;
+
+        // Discard the time and time-zone information.
+        const utc1 = Date.UTC(a.getFullYear(), a.getMonth(), a.getDate());
+        const utc2 = Date.UTC(b.getFullYear(), b.getMonth(), b.getDate());
+
+        return Math.floor((utc2 - utc1) / MS_PER_DAY);
+    }
+
+    function populateValues() {
+        const $headers = $('tr.headerrows', $root);
+        let totalGainAllRows = 0;
+        let totalCostAllRows = 0;
+        const now = new Date();
+        $headers.each((i, tr) => {
+            // const purchases = getAllPurchases(tr);
+            const purchases = getAllPurchaseRowValues(tr);
+            if (!purchases) {
+                // This row didn't have any associated dividends.
+                return;
+            }
+
+            const manualPurchaseRows = extractLikelyManualPurchases(purchases);
+            const dividendRows = extractLikelyDividends(purchases);
+
+            const manualPurchases = manualPurchaseRows.map(pluckAmount);
+            const dividends = dividendRows.map(pluckAmount);
+
+            const dividendSum = dividends.reduce(arrayReduceSum, 0);
+            const cost = manualPurchases.reduce(arrayReduceSum, 0);
+            totalCostAllRows += cost;
+            const marketValue = getMarketValueFromHeader(tr);
+            const totalGain = marketValue - cost;
+            totalGainAllRows += totalGain;
+            const positionOpenDate = extractOldestPurchaseDate(purchases);
+            const yearsPositionOpen = yearsDiff(positionOpenDate, now);
+            const cagr = calcCompoundAnnualGrowthRate(cost, marketValue, yearsPositionOpen);
+            const totalGainPercent = 100 * (totalGain / cost);
+            const $totalGain = $('.TotalGain', tr);
+            const $totalGainPercentage = $('.TotalGainPercentage', tr);
+            const $cagr = $('.CAGR', tr);
+            $totalGain.attr('title', dividends.map(numberFormat).join(", ") + " Sum: " + numberFormat(dividendSum));
+            $totalGain.text(numberFormat(totalGain));
+            $totalGainPercentage.text(numberFormat(totalGainPercent));
+            $cagr.text(numberFormat(cagr));
+            $cagr.attr("title", "Years position open: " + numberFormat(yearsPositionOpen)).css("cursor", "help");
+        });
+
+        // Do the last row, which is a total of all rows.
+        const totalGainAllRowsPercent = 100 * (totalGainAllRows / totalCostAllRows);
+        const $totalsRow = $("#TotalsFooter .superTotal", $root);
+        $('.TotalGain', $totalsRow).text(numberFormat(totalGainAllRows));
+        $('.TotalGainPercentage', $totalsRow).text(numberFormat(totalGainAllRowsPercent));
+    }
+
+    function pluckAmount(row) {
+        return row.Amount;
+    }
+
+    function getRowValues(tr) {
+        return {
+            Quantity: getValueFromHeader(tr, '.Quantity'),
+            OpenDate: getStringFromHeader(tr, '.OpenDate'),
+            MarketValue: getValueFromHeader(tr, '.MarketValue'),
+            Amount: getValueFromHeader(tr, '.Amount')
+        };
+    }
+
+    function arrayReduceSum(a, b) {
+        return a + b;
+    }
+
+    function extractLikelyDividends(purchases) {
+        return purchases.filter(row => !isWholeNumber(row.Quantity));
+    }
+
+    function looksLikeMdyDate(str) {
+        return /\d+\/\d+\/\d+/.test(str);
+    }
+    function extractOldestPurchaseDate(purchases) {
+        const dates = purchases
+            .filter(row => looksLikeMdyDate(row.OpenDate))
+            .map(row => mdyDateStringToDateObj(row.OpenDate));
+        dates.sort((a,b) => b.getTime() - a.getTime());
+        return dates.pop();
+    }
+
+    function extractLikelyManualPurchases(purchases) {
+        // I cant buy fractional shares, so if it's a whole number, it's unlikely a dividend DRIP purchase.
+        return purchases.filter(row => isWholeNumber(row.Quantity));
+    }
+
+    function isWholeNumber(num) {
+        return num % 1 < 0.00001;
+    }
+
+    function parseNumber(str) {
+        return parseFloat(str.replace(/[^0-9.]/g, ''));
+    }
+
+    function getMarketValueFromHeader(trElem) {
+        return getValueFromHeader(trElem, '.MarketValue');
+    }
+
+    function getValueFromHeader(trElem, selector) {
+        return parseNumber($(selector, trElem).text());
+    }
+
+    function getStringFromHeader(trElem, selector) {
+        return $(selector, trElem).text();
+    }
+
+    function getAllPurchaseRowValues(trElem) {
+        const $tbody = getAssociatedTbody(trElem);
+        if (!$tbody.length) {
+            // No tbody elem found, which means there's no drilldown - in other word, there's no dividend DRIP purchases.
+            // So, we will just use the values from the current row.
+            return [getRowValues(trElem)];
+        }
+
+        const $vals = $('.rows', $tbody).map((k, tr) => {
+            return getRowValues(tr);
+        });
+
+        // To real array.
+        return [].slice.call($vals);
+    }
+
+    function getAssociatedTbody(trElem) {
+        const id = getAssociatedTbodyId(trElem);
+        return $('#' + id, $root);
+    }
+
+    function setRootElem() {
+        $root = $('#sectionL01');
+    }
+
+    function getAssociatedTbodyId(trElem) {
+        const matches = /SUM_(\d+)/.exec($(trElem).attr('id'));
+        if (!matches) {
+            throw new Error("failed to extract id from tr header");
+        }
+        return 'L_' + matches[1];
+    }
+
+    function run() {
+        if (!isUnRealizedGainLossTabActive()) {
+            return;
+        }
+        setRootElem();
+        addNewColumnsToTables();
+        populateValues();
+    }
+
+    // https://gainskeeper.ameritrade.com/amtdGP/GainLoss.aspx?gainlosstype=unrealized&c_name=invest_VENDOR
+    run();
+})(window.jQuery);
